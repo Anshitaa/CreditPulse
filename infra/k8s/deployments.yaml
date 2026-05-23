@@ -1,0 +1,130 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: creditpulse
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: creditpulse-api
+  namespace: creditpulse
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: creditpulse-api
+  template:
+    metadata:
+      labels:
+        app: creditpulse-api
+    spec:
+      containers:
+        - name: api
+          image: creditpulse-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: creditpulse-secrets
+                  key: database-url
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: creditpulse-kafka:9092
+            - name: MLFLOW_TRACKING_URI
+              value: http://creditpulse-mlflow:5001
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-scorer
+  namespace: creditpulse
+spec:
+  replicas: 2   # KEDA will scale this 2–20 based on Kafka lag
+  selector:
+    matchLabels:
+      app: fraud-scorer
+  template:
+    metadata:
+      labels:
+        app: fraud-scorer
+    spec:
+      containers:
+        - name: scorer
+          image: creditpulse-api:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "ingestion.kafka.consumer"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: creditpulse-secrets
+                  key: database-url
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: creditpulse-kafka:9092
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: creditpulse-api
+  namespace: creditpulse
+spec:
+  selector:
+    app: creditpulse-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: creditpulse-ingress
+  namespace: creditpulse
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+    - host: creditpulse.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: creditpulse-api
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: creditpulse-frontend
+                port:
+                  number: 80

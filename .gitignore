@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+*.so
+
+# ML artifacts (tracked via MLflow, not git)
+models/artifacts/
+mlruns/
+agent/rag/faiss_index/
+
+# Data files (too large for git)
+data/*.parquet
+data/*.csv
+spark/jars/
+
+# Environment
+.env
+.env.local
+
+# Node
+node_modules/
+frontend/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kiro hook logs
+.kiro/hooks/*.log
+
+# Spark
+/tmp/creditpulse-checkpoints/
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage

@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "creditpulse-postgres": {
+      "command": "python",
+      "args": [".kiro/mcp/postgres-server.py"],
+      "env": {
+        "DATABASE_URL": "${DATABASE_URL}"
+      },
+      "description": "Query CreditPulse PostgreSQL: risk scores, audit decisions, drift reports, fairness metrics"
+    },
+    "creditpulse-kafka": {
+      "command": "python",
+      "args": [".kiro/mcp/kafka-server.py"],
+      "env": {
+        "KAFKA_BOOTSTRAP_SERVERS": "${KAFKA_BOOTSTRAP_SERVERS}"
+      },
+      "description": "Check Kafka consumer lag, topic health, and recent fraud alerts"
+    },
+    "creditpulse-mlflow": {
+      "command": "python",
+      "args": [".kiro/mcp/mlflow-server.py"],
+      "env": {
+        "MLFLOW_TRACKING_URI": "${MLFLOW_TRACKING_URI}"
+      },
+      "description": "List/compare MLflow experiments, promote model versions, get run artifacts"
+    }
+  }
+}

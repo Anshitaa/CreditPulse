@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "creditpulse-frontend",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/anshita/Desktop/CreditPulse/frontend && npm run dev"],
+      "cwd": "/Users/anshita/Desktop/CreditPulse/frontend",
+      "port": 5174
+    }
+  ]
+}

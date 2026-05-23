@@ -1,0 +1,37 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: creditpulse-fraud-scorer
+  namespace: creditpulse
+spec:
+  scaleTargetRef:
+    name: fraud-scorer
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  cooldownPeriod: 60
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: creditpulse-kafka:9092
+        consumerGroup: fraud-scorer-group
+        topic: transactions.raw
+        lagThreshold: "500"        # scale up when lag > 500 msgs/replica
+        activationLagThreshold: "10"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: creditpulse-alert-dispatcher
+  namespace: creditpulse
+spec:
+  scaleTargetRef:
+    name: alert-dispatcher
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: creditpulse-kafka:9092
+        consumerGroup: alert-dispatcher-group
+        topic: alerts.fraud
+        lagThreshold: "100"
