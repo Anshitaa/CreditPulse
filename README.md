@@ -215,4 +215,4 @@ infra/k8s/                         # Kubernetes manifests + KEDA ScaledObject
 ## Author
 
 **Anshita Bhardwaj** — MS Data Science, Arizona State University (May 2026)  
-Target roles: AI/ML Platform · Data Engineering · MLE (AmEx · Tesla · Amazon · PayPal)
+
