@@ -12,8 +12,9 @@ Auto-loaded by Claude Code on every session.
 | Phase | Status | Checkpoint |
 |---|---|---|
 | 1 — Synthetic Data | ✅ Built | 150K transactions, 12.5% fraud rate, loaded to `raw.transactions` |
-| 2 — Spark Streaming Features | ✅ Built | `features/spark_streaming_features.py` (needs JDBC JAR + Kafka) |
-| 3 — ML Models | ✅ Built | `fraud_detector.pkl`, `anomaly_detector.pkl`, `credit_risk_scorer.pkl` |
+| 2 — Spark Streaming Features | ✅ Built | `--once` mode added; end-to-end test in `test_spark_streaming.py` |
+| 3 — ML Models (synthetic) | ✅ Built | `fraud_detector.pkl` AUC 0.681 (synthetic ceiling — documented) |
+| 3b — ML Models (IEEE-CIS) | ✅ Built | `fraud_detector_ieee.pkl` trained on 590K real Vesta transactions; AUC 0.90+ |
 | 4 — SHAP + Counterfactuals | ✅ Built | Dice-ML + SHAP top-5 per transaction |
 | 5 — Fairness + Drift | ✅ Built | Fairlearn gate + PSI monitor → `audit.*` tables |
 | 6 — LLM Agent | ✅ Built | LangChain ReAct + FAISS RAG (16 chunks, 8 regulatory docs) |
@@ -23,6 +24,8 @@ Auto-loaded by Claude Code on every session.
 | 10 — Docker + K8s | ✅ Built | docker-compose + minikube manifests + KEDA ScaledObject |
 | 11 — Unit Tests | ✅ Built | 15/15 passing (`tests/unit/test_models.py`) |
 | 12 — Integration Tests | ✅ Built | 105/105 passing (`tests/integration/`) |
+| 13 — Load Tests | ✅ Built | Locust WebSocket load test — 50 concurrent clients (`tests/load/`) |
+| 14 — Real Dataset (IEEE-CIS) | ✅ Built | 590K Vesta transactions in `raw.ieee_cis_transactions` |
 
 ---
 
@@ -109,6 +112,18 @@ pytest tests/integration/test_agent.py -v
 
 # Kafka tests (requires Kafka container)
 pytest tests/integration/test_kafka.py -v
+
+# Spark streaming end-to-end (requires Docker + JAVA_HOME)
+export JAVA_HOME=/opt/anaconda3
+pytest tests/integration/test_spark_streaming.py -v -s
+# → publishes to Kafka, runs Spark --once, verifies PostgreSQL rows
+
+# WebSocket load test (requires API running on port 8000)
+mkdir -p tests/load/results
+locust -f tests/load/locustfile_ws.py \
+       --headless -u 50 -r 5 -t 60s \
+       --host http://127.0.0.1:8000 \
+       --csv tests/load/results/ws_load_test
 ```
 
 ---
@@ -129,14 +144,20 @@ pytest tests/integration/test_kafka.py -v
 ## Repository Structure
 
 ```
-data/synthetic_transactions.py     # 150K transactions, 12.5% fraud rate
+data/
+  synthetic_transactions.py        # 150K synthetic transactions, 12.5% fraud rate
+  load_ieee_cis.py                 # IEEE-CIS ETL: downloads + loads 590K real Vesta transactions
+  ieee_cis/                        # train_transaction.csv + train_identity.csv (gitignored)
 ingestion/kafka/producer.py        # Idempotent Kafka producer (simulate/replay modes)
-features/spark_streaming_features.py  # PySpark → Feast → Redis velocity features
+features/spark_streaming_features.py  # PySpark → Feast → Redis; --once flag for CI testing
 models/
-  fraud_detector.py                # XGBoost + Optuna HPO + SHAP
+  fraud_detector.py                # XGBoost + Optuna HPO + SHAP; --ieee-cis flag for real data
   anomaly.py                       # Isolation Forest
   credit_risk.py                   # XGBoost regression
   counterfactual.py                # Dice-ML counterfactuals
+  artifacts/
+    fraud_detector.pkl             # Trained on synthetic data (AUC 0.681)
+    fraud_detector_ieee.pkl        # Trained on IEEE-CIS real data (AUC 0.90+)
 governance/
   fairness_gate.py                 # Fairlearn (3 protected groups, δ < 0.05)
   drift_monitor.py                 # PSI per feature → audit.drift_reports
@@ -149,15 +170,18 @@ api/
 frontend/                          # React 5-page dashboard (Vite + Recharts)
 tests/
   unit/test_models.py              # 15 unit tests
-  integration/                     # 105+ integration tests (6 files + agent + kafka)
-docs/model_risk_card_v1.0.0.md    # OCC SR 11-7 model risk card
+  integration/                     # 105+ integration tests (6 files + agent + kafka + spark)
+  load/locustfile_ws.py            # Locust WebSocket load test (50 concurrent clients)
+docs/
+  model_risk_card_v1.0.0.md        # OCC SR 11-7 model risk card (real IEEE-CIS metrics)
+  project_notes.md                 # Issues faced + interview prep topics
 .kiro/
   specs/                           # 3 EARS requirement specs
   hooks/                           # fairness-gate.sh, psi-check.sh, auto-test.sh
   mcp/                             # 3 MCP servers (postgres, kafka, mlflow)
   steering/                        # ml-standards, fairness-standards, coding-standards
 infra/docker/docker-compose.yml    # Postgres/Kafka/Redis/Zookeeper
-infra/k8s/deployments.yaml         # K8s manifests
+infra/k8s/deployments.yaml         # K8s manifests + KEDA ScaledObject
 scripts/minikube-up.sh             # One-shot K8s demo deploy
 ```
 

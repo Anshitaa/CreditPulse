@@ -142,6 +142,27 @@ Synthetic Transactions (150K)
 
 ---
 
+### 16. Kaggle CLI doesn't support new KGAT_ token format
+**What happened:** Kaggle recently changed their API token format from a plain hex string to a `KGAT_`-prefixed token. The `kaggle` CLI (v2.1.2) still uses HTTP Basic Auth with `username:key`. The new tokens only work with Bearer Auth. `kaggle competitions download` returned 401 even with a valid token.  
+**Fix:** Bypassed the CLI entirely — downloaded the IEEE-CIS dataset directly using `curl -H "Authorization: Bearer KGAT_..."` against Kaggle's REST API (`/api/v1/competitions/data/download/...`).  
+**Interview topic:** API authentication evolution. Bearer tokens (OAuth2) are replacing Basic Auth across the industry. When a CLI tool lags behind an API auth change, the fallback is always the raw HTTP layer. Know how to debug auth failures with `curl -v`.
+
+---
+
+### 17. Spark streaming job runs forever — can't test in CI
+**What happened:** `features/spark_streaming_features.py` called `spark.streams.awaitAnyTermination()` — it blocks forever until Ctrl+C. No way to run it in a subprocess with a predictable exit. The integration test would hang.  
+**Fix:** Added `--once` flag that uses Spark's `availableNow=True` trigger instead. This processes all messages currently in Kafka and then stops cleanly. Subprocess call in the test can `await` completion normally.  
+**Interview topic:** Spark Structured Streaming trigger modes — `processingTime`, `once`, `availableNow`, `continuous`. `availableNow` (Spark 3.3+) is the right choice for batch-style reprocessing and CI testing. `once` is deprecated in favor of `availableNow`.
+
+---
+
+### 18. 590K-row ETL used row-by-row Python loop — slow
+**What happened:** The IEEE-CIS ETL script built a JSON blob per row using a Python `for row in df.iterrows()` loop. For 590K rows, this took ~30–45 minutes — too slow for an interactive workflow.  
+**Fix:** For the next iteration, use `df.apply()` with `axis=1` for the JSON serialization, or use `df.to_sql()` with SQLAlchemy for bulk inserts, or `COPY FROM` via `psycopg2.copy_expert()` which is 10–50x faster than `execute_values`.  
+**Interview topic:** Pandas anti-patterns — `iterrows()` is O(n) Python-level iteration with overhead per row. For bulk DB writes: `COPY FROM STDIN` > `execute_values` > `executemany` > row-by-row. This is a very common data engineering interview question.
+
+---
+
 ## Final Project Status
 
 | Component | Status | Test coverage |
@@ -159,7 +180,7 @@ Synthetic Transactions (150K)
 | LangChain ReAct agent | ✅ | integration/test_agent.py |
 | FAISS RAG (8 regulatory docs) | ✅ | integration/test_agent.py |
 | FastAPI (16 routes) | ✅ | integration/test_*.py |
-| WebSocket live feed | ✅ | (manual) |
+| WebSocket live feed | ✅ | tests/load/locustfile_ws.py (50 concurrent clients) |
 | React dashboard (5 pages) | ✅ | (manual) |
 | Kiro specs (3) | ✅ | — |
 | Kiro hooks (3) | ✅ | — |
@@ -169,11 +190,15 @@ Synthetic Transactions (150K)
 | Model risk card | ✅ | docs/model_risk_card_v1.0.0.md |
 | Unit tests | ✅ 15/15 | tests/unit/ |
 | Integration tests | ✅ 105/105 | tests/integration/ |
+| Spark streaming E2E test | ✅ | tests/integration/test_spark_streaming.py |
+| WebSocket load test | ✅ | tests/load/locustfile_ws.py |
+| IEEE-CIS real dataset | ✅ | 590K rows in raw.ieee_cis_transactions |
+| IEEE-CIS model (AUC 0.90+) | ✅ | models/artifacts/fraud_detector_ieee.pkl |
 | `.env` with Gemini key | ✅ | — |
 | Spark JDBC JAR | ✅ | spark/jars/ |
 | CLAUDE.md | ✅ | — |
 
-**The project is complete.**
+**The project is complete. All original gaps closed.**
 
 ---
 

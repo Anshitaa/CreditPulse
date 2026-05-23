@@ -70,6 +70,7 @@ Synthetic Transactions (150K, 12.5% fraud rate)
 - Sub-100ms p99 inference via XGBoost + pre-computed Feast features
 - Composite decision: **FRAUD** (score > 75) / **REVIEW** (40–75) / **CLEAR** (< 40)
 - Live WebSocket feed — watch scores stream in real time
+- Two trained models: synthetic baseline (AUC 0.681) and IEEE-CIS real-data model (AUC 0.90+)
 
 ### Explainability
 - **SHAP** — top-5 feature contributions per transaction
@@ -134,6 +135,16 @@ pytest tests/integration/ \
   --ignore=tests/integration/test_kafka.py \
   -v
 
+# Spark streaming end-to-end — Kafka → Spark → PostgreSQL
+export JAVA_HOME=/opt/anaconda3
+pytest tests/integration/test_spark_streaming.py -v -s
+
+# WebSocket load test — 50 concurrent clients, 60 seconds
+locust -f tests/load/locustfile_ws.py \
+       --headless -u 50 -r 5 -t 60s \
+       --host http://127.0.0.1:8000 \
+       --csv tests/load/results/ws_load_test
+
 # Agent tests — requires Gemini API key (~60s, rate-limit guard)
 set -a && source .env && set +a
 pytest tests/integration/test_agent.py -v
@@ -144,9 +155,11 @@ pytest tests/integration/test_agent.py -v
 ## Repository Structure
 
 ```
-data/                              # Synthetic transaction generator (150K rows)
+data/
+  synthetic_transactions.py        # Synthetic generator (150K rows, 12.5% fraud)
+  load_ieee_cis.py                 # IEEE-CIS ETL — 590K real Vesta transactions
 ingestion/kafka/                   # Idempotent Kafka producer
-features/                          # PySpark streaming features → Feast → Redis
+features/                          # PySpark streaming features → Feast → Redis (--once for CI)
 models/
   fraud_detector.py                # XGBoost + Optuna HPO + SHAP
   anomaly.py                       # Isolation Forest

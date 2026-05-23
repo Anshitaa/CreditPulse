@@ -17,7 +17,12 @@ agent/rag/faiss_index/
 # Data files (too large for git)
 data/*.parquet
 data/*.csv
+data/ieee_cis/*.csv
+data/ieee_cis/*.zip
 spark/jars/
+
+# Load test results
+tests/load/results/
 
 # Environment
 .env
