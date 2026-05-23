@@ -14,7 +14,8 @@ Writes computed features to:
 
 Usage:
     export JAVA_HOME=/opt/anaconda3
-    python features/spark_streaming_features.py --local
+    python features/spark_streaming_features.py --local           # continuous streaming
+    python features/spark_streaming_features.py --local --once    # process all available, then stop (CI/testing)
 """
 
 import os
@@ -184,7 +185,15 @@ def write_to_postgres(df, table: str, mode: str = "append"):
     )
 
 
-def run_streaming(local: bool = False) -> None:
+def run_streaming(local: bool = False, once: bool = False) -> None:
+    """
+    Run the Spark streaming feature pipeline.
+
+    Args:
+        local: Use local Spark mode (no cluster needed).
+        once: Use availableNow trigger — processes all messages currently in Kafka
+              then stops. Ideal for CI/end-to-end testing. Requires Spark 3.3+.
+    """
     spark = create_spark(local)
     spark.sparkContext.setLogLevel("WARN")
 
@@ -197,12 +206,20 @@ def run_streaming(local: bool = False) -> None:
         if df.count() > 0:
             write_to_postgres(df, table)
 
+    if once:
+        # availableNow: process everything in Kafka right now, then stop.
+        # Perfect for CI smoke tests and end-to-end validation.
+        trigger_kwargs = {"availableNow": True}
+        print("Running in --once mode (availableNow trigger). Will stop after processing all available messages.")
+    else:
+        trigger_kwargs = {"processingTime": "30 seconds"}
+
     queries.append(
         txn_count_1h.writeStream
         .foreachBatch(lambda df, epoch: write_micro_batch(df, epoch, "features_account_txn_counts"))
         .outputMode("update")
         .option("checkpointLocation", "/tmp/creditpulse-checkpoints/txn_count_1h")
-        .trigger(processingTime="30 seconds")
+        .trigger(**trigger_kwargs)
         .start()
     )
 
@@ -211,7 +228,7 @@ def run_streaming(local: bool = False) -> None:
         .foreachBatch(lambda df, epoch: write_micro_batch(df, epoch, "features_velocity"))
         .outputMode("update")
         .option("checkpointLocation", "/tmp/creditpulse-checkpoints/velocity_5m")
-        .trigger(processingTime="30 seconds")
+        .trigger(**trigger_kwargs)
         .start()
     )
 
@@ -220,7 +237,7 @@ def run_streaming(local: bool = False) -> None:
         .foreachBatch(lambda df, epoch: write_micro_batch(df, epoch, "features_amount_stats"))
         .outputMode("update")
         .option("checkpointLocation", "/tmp/creditpulse-checkpoints/amount_stats")
-        .trigger(processingTime="60 seconds")
+        .trigger(**{"availableNow": True} if once else {"processingTime": "60 seconds"})
         .start()
     )
 
@@ -229,22 +246,30 @@ def run_streaming(local: bool = False) -> None:
         .foreachBatch(lambda df, epoch: write_micro_batch(df, epoch, "features_merchant_stats"))
         .outputMode("update")
         .option("checkpointLocation", "/tmp/creditpulse-checkpoints/merchant_stats")
-        .trigger(processingTime="60 seconds")
+        .trigger(**{"availableNow": True} if once else {"processingTime": "60 seconds"})
         .start()
     )
 
-    print(f"Streaming {len(queries)} feature pipelines. Ctrl+C to stop.")
-    try:
-        spark.streams.awaitAnyTermination()
-    except KeyboardInterrupt:
-        print("Stopping all streaming queries...")
+    if once:
+        # Wait for all queries to finish processing available data
         for q in queries:
-            q.stop()
+            q.awaitTermination()
+        print(f"--once mode complete. Processed all available Kafka messages.")
+    else:
+        print(f"Streaming {len(queries)} feature pipelines. Ctrl+C to stop.")
+        try:
+            spark.streams.awaitAnyTermination()
+        except KeyboardInterrupt:
+            print("Stopping all streaming queries...")
+            for q in queries:
+                q.stop()
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--local", action="store_true", help="Run in local Spark mode")
+    parser.add_argument("--once", action="store_true",
+                        help="Process all available Kafka messages then stop (CI/testing mode)")
     args = parser.parse_args()
-    run_streaming(local=args.local)
+    run_streaming(local=args.local, once=args.once)
