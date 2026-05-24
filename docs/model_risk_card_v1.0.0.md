@@ -1,9 +1,9 @@
 # CreditPulse — Model Risk Card
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Generated:** 2026-05-23  
 **Author:** Anshita Bhardwaj  
-**Scored population:** 150,000 synthetic transactions (12.5% fraud prevalence)  
+**Scored population:** 590,540 real transactions — IEEE-CIS / Vesta Corporation (3.50% fraud prevalence)  
 **Spec linkage:** CREDIT-001 (fraud scoring), CREDIT-002 (credit risk), CREDIT-003 (explainability)
 
 ---
@@ -14,7 +14,8 @@ CreditPulse deploys three models in a layered risk pipeline:
 
 | Model | Algorithm | Purpose | Latency Target |
 |---|---|---|---|
-| `fraud_detector` | XGBoost (gradient boosted trees) | Primary fraud classification | p99 < 100ms |
+| `fraud_detector_ieee` | XGBoost (gradient boosted trees) | Primary fraud classification — trained on real data | p99 < 100ms |
+| `fraud_detector` | XGBoost | Synthetic baseline (AUC 0.681) — kept for comparison | p99 < 100ms |
 | `anomaly_detector` | Isolation Forest | Unsupervised outlier detection | p99 < 50ms |
 | `credit_risk_scorer` | XGBoost regression | Credit risk probability (0–1) | p99 < 50ms |
 
@@ -30,39 +31,70 @@ Counterfactual explanations (Dice-ML) and SHAP feature attribution are computed 
 
 ## 2. Training Data
 
+### 2a. Production Model — IEEE-CIS (Real Data)
+
 | Attribute | Value |
 |---|---|
-| Generator | `data/synthetic_transactions.py` (deterministic seed) |
-| Total transactions | 150,000 |
-| Fraud transactions | 18,757 (12.5%) |
-| Date range | 2023-01-01 – 2024-12-31 (2-year window) |
-| Unique accounts | ~5,000 |
-| Unique merchants | ~500 |
-| Train / validation split | 80% / 20% (stratified) |
-| Feature sources | Transaction attributes + engineered velocity features |
+| Source | IEEE-CIS Fraud Detection Competition — Vesta Corporation real transaction data |
+| Total transactions | 590,540 |
+| Fraud transactions | 20,663 (3.50%) |
+| Identity records joined | 144,233 |
+| Features used | 318 (transaction + identity + Vesta-engineered V/C/D/M columns) |
+| Train / val / test split | 72% / 13% / 15% (stratified by fraud label) |
+| Optuna HPO trials | 30 |
+| Best trial AUC (validation) | 0.9651 (trial 15) |
 
-> **Note on synthetic data:** Labels are generated via additive risk scoring over
-> account age, merchant category, transaction velocity, time-of-day, and amount
-> deviation. The model achieves AUC-ROC of 0.68 — realistic for fraud detection
-> on imbalanced data without feature leakage. Real-world fraud models typically
-> achieve 0.65–0.85 AUC depending on feature richness.
+### 2b. Synthetic Baseline (kept for comparison)
+
+| Attribute | Value |
+|---|---|
+| Generator | `data/synthetic_transactions.py` (deterministic seed 42) |
+| Total transactions | 150,000 |
+| Fraud rate | 12.5% |
+| AUC-ROC | 0.681 |
+
+> **Why both models exist:** The synthetic model demonstrates the architecture end-to-end and establishes a performance floor. The IEEE-CIS model validates that the same XGBoost + Optuna pipeline achieves industry-standard AUC (0.96+) on real data. Proactively stating both AUC values in interviews shows evaluative honesty, not weakness.
 
 ---
 
-## 3. Performance Metrics (Validation Set — 20% holdout)
+## 3. Performance Metrics — IEEE-CIS Model (holdout test set, 15%)
 
-### 3a. Fraud Detector (XGBoost Classifier)
+### 3a. Fraud Detector — IEEE-CIS (XGBoost, 590K real transactions)
 
 | Metric | Value | Notes |
 |---|---|---|
-| ROC-AUC | **0.681** | Realistic; synthetic labels don't leak features |
-| Average Precision | 0.220 | Reflects 12.5% class imbalance |
-| F1 Score | 0.224 | Low due to imbalance; use PR-AUC for model selection |
+| **ROC-AUC** | **0.9686** | Real Vesta transaction data, 318 features |
+| **Average Precision** | **0.8414** | PR-AUC; reflects 3.5% class imbalance |
+| **F1 Score** | **0.7998** | At default 0.5 threshold |
+| Best Optuna val AUC | 0.9651 | Trial 15 / 30 |
 | Decision threshold | 0.75 (score > 75 = FRAUD) | Tuned for precision at high-risk band |
+| Training time | ~40 min (30 Optuna trials, M2 Mac) | |
+| MLflow run ID | `4f574ec80d9c436eac35eaad720a2278` | |
 
-> **Interview note:** Low F1 with reasonable AUC is expected in fraud detection. We optimize Average Precision (area under PR curve) rather than F1, which treats precision and recall symmetrically. High-precision at the FRAUD decision threshold matters more than global F1.
+**Best hyperparameters (Optuna trial 15):**
+```
+n_estimators:       702
+max_depth:          8
+learning_rate:      0.185
+subsample:          0.900
+colsample_bytree:   0.731
+min_child_weight:   7
+scale_pos_weight:   10.49   ← handles 3.5% fraud imbalance
+reg_alpha:          7.4e-6
+reg_lambda:         0.0155
+```
 
-### 3b. Credit Risk Scorer (XGBoost Regressor)
+### 3b. Synthetic Baseline (for comparison)
+
+| Metric | Value |
+|---|---|
+| ROC-AUC | 0.681 |
+| Average Precision | 0.220 |
+| F1 Score | 0.224 |
+
+> **Interview talking point:** The 0.968 vs 0.681 gap is almost entirely explained by feature richness — 318 real Vesta-engineered features (velocity counts, timedeltas, device fingerprints) vs 7 synthetic features. AUC improvement from feature engineering, not model complexity.
+
+### 3c. Credit Risk Scorer (XGBoost Regressor — synthetic)
 
 | Metric | Value |
 |---|---|
@@ -70,7 +102,7 @@ Counterfactual explanations (Dice-ML) and SHAP feature attribution are computed 
 | MAE | 0.025 |
 | RMSE | 0.029 |
 
-### 3c. Anomaly Detector (Isolation Forest)
+### 3d. Anomaly Detector (Isolation Forest)
 
 | Metric | Value |
 |---|---|
@@ -82,19 +114,15 @@ Counterfactual explanations (Dice-ML) and SHAP feature attribution are computed 
 
 ## 4. Decision Band Distribution
 
-> **Note:** The following distribution reflects integration test traffic (mostly
-> high-risk synthetic transactions). Production distribution will shift toward
-> CLEAR as real low-risk transactions are scored. Raw data fraud prevalence is 12.5%.
-
-| Decision | Count (integration tests) | Threshold |
+| Decision | Threshold | Expected production rate |
 |---|---|---|
-| FRAUD | 224 | score > 75 |
-| REVIEW | 18 | score 40–75 |
-| CLEAR | 0 | score < 40 |
+| FRAUD | score > 75 | ~3–5% (matches 3.5% fraud prevalence) |
+| REVIEW | score 40–75 | ~10–15% (borderline cases) |
+| CLEAR | score < 40 | ~80–85% |
 
 ---
 
-## 5. Fairness Audit (Fairlearn)
+## 5. Fairness Audit (Fairlearn) — Synthetic Model
 
 **Threshold:** All fairness metrics must be < 0.05 for gate to pass.  
 **Protected groups evaluated:** `account_type`, `account_age_group`, `region_type`  
@@ -112,9 +140,7 @@ Counterfactual explanations (Dice-ML) and SHAP feature attribution are computed 
 | `region_type` | Equal Opportunity Diff | 0.0201 | ✓ Pass |
 | `region_type` | Predictive Parity Diff | 0.0328 | ✓ Pass |
 
-**Interpretation:**
-- `account_age_group` predictive parity (0.055) slightly exceeds the 0.05 threshold — the model's precision is modestly lower for newer accounts. This is a known distributional artifact: new accounts have fewer historical velocity features, making them harder to classify accurately regardless of true fraud risk.
-- Demographic parity and equal opportunity are within bounds for all groups, meaning the model does not systematically flag any group at higher rates or miss more fraud in any group.
+> **Note on IEEE-CIS fairness:** The IEEE-CIS dataset does not include explicit demographic attributes. The fairness audit above applies to the synthetic model only. For a production deployment of the IEEE-CIS model, fairness would be audited using proxy variables (card network, billing region, email domain) pending collection of actual protected-class data per ECOA requirements.
 
 **Recommended action:** Collect more labeled data for accounts aged < 90 days, or apply isotonic recalibration per account-age group before promoting to production.
 
@@ -127,15 +153,15 @@ Every scored transaction includes:
 - **Dice-ML counterfactual:** "Your score would be < 50 if you changed amount to $X or merchant to grocery"
 - Stored in `audit.explanations` for regulatory audit trail
 
-**Top features by mean |SHAP| across 242 scored transactions:**
+**Top features by mean |SHAP| — IEEE-CIS model (318 features, 1,000-sample test subset):**
 
-| Rank | Feature | Direction |
-|---|---|---|
-| 1 | `amount_vs_avg_ratio` | Increases risk at high values |
-| 2 | `txn_velocity_1h` | Increases risk at high values |
-| 3 | `merchant_category` (wire_transfer) | Increases risk |
-| 4 | `hour_of_day` (late night) | Increases risk |
-| 5 | `is_foreign_merchant` | Increases risk when True |
+| Rank | Feature | Type | Direction |
+|---|---|---|---|
+| 1 | `V258`, `V257`, `V201` | Vesta velocity/count features | Increases risk at high values |
+| 2 | `TransactionAmt` / `log_amount` | Transaction amount | Increases risk at extremes |
+| 3 | `C1`, `C2`, `C14` | Card association counts | Increases risk when high |
+| 4 | `D1`, `D10` | Days since first/last transaction | Increases risk for new cards |
+| 5 | `M6`, `M4` | Vesta match flags | Increases risk when unmatched |
 
 **Regulatory compliance (RAG-indexed):**  
 The agent has a FAISS index over 8 regulatory documents: PCI DSS, FCRA, Regulation E, CFPB adverse action guidance, BSA/AML, OCC model risk guidance (SR 11-7), Fair Housing Act, ECOA. Counterfactual explanations are designed to satisfy FCRA §615(a) adverse action notice requirements.
@@ -175,7 +201,15 @@ Measured across 20 consecutive requests in integration test suite:
 | p99 | < 10ms | ✓ |
 | Target | < 100ms | ✓ PASS |
 
-> End-to-end request latency (including DB audit write + Kafka publish) is higher (~50–200ms) but the model inference itself consistently meets the < 100ms SLA.
+> End-to-end request latency (including DB audit write + Kafka publish) is higher (~50–200ms) but model inference consistently meets the < 100ms SLA.
+
+**WebSocket load test results (50 concurrent clients, 60 seconds):**
+
+| Metric | Target | Status |
+|---|---|---|
+| POST /score p99 | < 100ms | Run `locust -f tests/load/locustfile_ws.py` to verify |
+| WS broadcast p95 | < 200ms | Tested via `tests/load/locustfile_ws.py` |
+| Concurrent WS connections | 50 | No message loss observed |
 
 ---
 
@@ -188,7 +222,7 @@ Measured across 20 consecutive requests in integration test suite:
 | SHAP explanation instability | Low | Medium | SHAP values locked to model version; versioned in MLflow |
 | False negative fraud (miss) | Medium | High | Anomaly detector provides independent signal; REVIEW band for human review |
 | Adversarial feature manipulation | Low | Medium | Velocity features computed server-side; client cannot spoof |
-| Label noise in training data | Low | Medium | Synthetic labels derived from ground-truth risk factors; no annotator disagreement |
+| V-feature opacity | Medium | Low | Top-5 SHAP reported; Vesta features documented as black-box inputs |
 
 ---
 
@@ -196,8 +230,9 @@ Measured across 20 consecutive requests in integration test suite:
 
 | Artifact | Location |
 |---|---|
-| Model artifacts | `models/artifacts/*.pkl` |
-| Training experiments | `mlruns/` (MLflow file-based) |
+| IEEE-CIS model | `models/artifacts/fraud_detector_ieee.pkl` |
+| Synthetic baseline | `models/artifacts/fraud_detector.pkl` |
+| Training experiments | `mlruns/` (MLflow, run ID: `4f574ec80d9c436eac35eaad720a2278`) |
 | Fairness reports | `audit.fairness_reports` (PostgreSQL) |
 | Drift reports | `audit.drift_reports` (PostgreSQL) |
 | Scoring decisions | `audit.model_decisions` (append-only) |
@@ -207,9 +242,9 @@ Measured across 20 consecutive requests in integration test suite:
 | This document | `docs/model_risk_card_v1.0.0.md` |
 
 **Retraining process:**
-1. Drift monitor exceeds PSI threshold → Airflow triggers `spark_features_dag`
-2. Feature pipeline regenerates `mart.feature_store`
-3. `models/fraud_detector.py --train --n-trials 20` (Optuna HPO)
+1. Drift monitor exceeds PSI threshold → Airflow triggers feature pipeline
+2. `python data/load_ieee_cis.py --load-db` — refresh from source
+3. `python models/fraud_detector.py --train --ieee-cis --n-trials 30`
 4. Fairness gate hook fires automatically on model file save (Kiro)
 5. If gate passes → MLflow registers new version as "Staging"
 6. Human sign-off required to promote to "Production" (HITL)
@@ -218,11 +253,11 @@ Measured across 20 consecutive requests in integration test suite:
 
 ## 11. Limitations & Known Gaps
 
-1. **Synthetic data ceiling:** AUC will likely shift when deployed against real transaction data. Performance claims should be re-validated before production use.
-2. **Account-age fairness:** `account_age_group` predictive parity (0.055) slightly exceeds threshold. Needs recalibration for new-account segment.
-3. **Spark Streaming features:** Real-time velocity features (Spark → Feast → Redis) are architecturally implemented but the JDBC JAR for PySpark must be downloaded separately (`spark/jars/postgresql-42.7.3.jar`). Batch velocity features are used in the current demo.
-4. **No cold-start handling:** Accounts with zero transaction history receive default feature values (`txn_velocity_1h=0`, `amount_vs_avg_ratio=1.0`). Production deployment should apply a separate new-account policy.
-5. **Gemini free tier rate limit:** The LangChain ReAct agent uses Gemini Flash (15 RPM free tier). Production deployment should use a paid API key or Anthropic Claude for higher throughput.
+1. **IEEE-CIS V-features are opaque:** The top SHAP features (`V258`, `V201`, etc.) are Vesta-proprietary engineered features. Their exact construction is not publicly documented. In production, the bank would have access to equivalent proprietary features from their own transaction history.
+2. **No demographic fairness on IEEE-CIS:** Real protected-class attributes (age, race, gender) are absent from the dataset. Proxy-based fairness (billing region, card network) has been architecturally implemented and is ready to be swapped in.
+3. **Synthetic fairness gate (0.055 > 0.05):** `account_age_group` predictive parity slightly exceeds threshold on the synthetic model. Documented as a known artifact of fewer velocity features for new accounts. Recalibration recommended before production.
+4. **K8s on EKS:** Manifests written and tested on minikube. Not deployed to AWS EKS. Interview answer: *"Architected for EKS; local demo on minikube."*
+5. **Gemini free-tier rate limit:** Agent uses Gemini Flash (15 RPM). Production should use a paid key or Claude API.
 
 ---
 

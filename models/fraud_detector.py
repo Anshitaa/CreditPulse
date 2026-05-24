@@ -174,7 +174,9 @@ def load_ieee_cis_training_data() -> tuple[pd.DataFrame, list[str]]:
     records = []
     for row in rows:
         rec = dict(row)
-        blob = _json.loads(rec.pop("features_json") or "{}")
+        raw = rec.pop("features_json") or {}
+        # psycopg2 auto-parses JSONB → dict; only call json.loads on str
+        blob = raw if isinstance(raw, dict) else _json.loads(raw)
         rec.update(blob)
         records.append(rec)
 
