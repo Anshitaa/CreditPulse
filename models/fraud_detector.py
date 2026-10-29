@@ -34,8 +34,10 @@ import shap
 import structlog
 import xgboost as xgb
 from mlflow.tracking import MlflowClient
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import (
     average_precision_score,
+    brier_score_loss,
     classification_report,
     f1_score,
     roc_auc_score,
@@ -69,6 +71,32 @@ FEATURE_DESCRIPTIONS = {
     "is_foreign_merchant": "1 if merchant is outside the account's home country",
     "merchant_category_encoded": "Merchant category label-encoded (high-risk categories have higher values)",
 }
+
+# ── Probability calibration ─────────────────────────────────────────────────
+# Optuna searches scale_pos_weight in 10–60 against a ~7:1 class ratio, which
+# inflates raw probabilities (mean raw prob 0.79 vs a 12.5% fraud rate), so the
+# 40/75 policy bands were being applied to numbers that were not probabilities.
+# An isotonic calibrator fitted on the validation split maps raw scores back to
+# observed fraud rates. Band thresholds are then chosen on validation data by
+# alert budget, and the 0–100 risk score is rescaled so the 40 (REVIEW) and
+# 75 (FRAUD) policy lines fall exactly on those calibrated thresholds.
+REVIEW_ALERT_RATE = 0.12  # share of traffic sent to REVIEW or FRAUD
+FRAUD_ALERT_RATE = 0.02   # share of traffic auto-blocked as FRAUD
+
+_calibration: dict | None = None  # set by load_model(); None → raw probabilities
+
+
+def _calibration_path(model_pkl_name: str) -> Path:
+    return MODEL_DIR / model_pkl_name.replace(".pkl", "_calibration.pkl")
+
+
+def _risk_score(prob: float, review_t: float, fraud_t: float) -> float:
+    """Monotone map of calibrated probability onto the 0–100 policy scale."""
+    if prob < review_t:
+        return 40 * prob / review_t
+    if prob < fraud_t:
+        return 40 + 35 * (prob - review_t) / (fraud_t - review_t)
+    return 75 + 25 * (prob - fraud_t) / max(1 - fraud_t, 1e-9)
 
 
 def load_training_data(parquet_path: str | None = None) -> pd.DataFrame:
@@ -333,27 +361,54 @@ def train(
         mlflow.log_param("fraud_rate_train", float(y_train.mean()))
         mlflow.log_param("n_features", len(feature_cols))
 
-        # Final training on train+val with best params
+        # Final model is fit on train only: the validation split is reserved
+        # for the calibrator, so it must not have seen those rows.
         final_model = xgb.XGBClassifier(**best_params)
-        final_model.fit(
-            pd.concat([X_train, X_val]),
-            pd.concat([y_train, y_val]),
-            verbose=False,
-        )
+        final_model.fit(X_train, y_train, verbose=False)
 
-        # Evaluation
-        y_pred_proba = final_model.predict_proba(X_test)[:, 1]
-        y_pred = (y_pred_proba > 0.5).astype(int)
+        # Calibration + band thresholds, both chosen on validation data
+        calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0, y_max=1)
+        calibrator.fit(final_model.predict_proba(X_val)[:, 1], y_val)
+        cal_val = calibrator.predict(final_model.predict_proba(X_val)[:, 1])
+        review_t = float(np.quantile(cal_val, 1 - REVIEW_ALERT_RATE))
+        fraud_t = float(np.quantile(cal_val, 1 - FRAUD_ALERT_RATE))
+        if fraud_t <= review_t:  # isotonic plateaus can collapse the two quantiles
+            fraud_t = float(np.unique(cal_val[cal_val > review_t]).min()) if (cal_val > review_t).any() else review_t + 1e-6
+
+        # Evaluation on the untouched test split
+        raw_test = final_model.predict_proba(X_test)[:, 1]
+        y_pred_proba = calibrator.predict(raw_test)
+        y_pred = (y_pred_proba >= fraud_t).astype(int)
         auc = roc_auc_score(y_test, y_pred_proba)
         ap = average_precision_score(y_test, y_pred_proba)
         f1 = f1_score(y_test, y_pred)
+        brier_raw = brier_score_loss(y_test, raw_test)
+        brier_cal = brier_score_loss(y_test, y_pred_proba)
+        band = np.where(y_pred_proba >= fraud_t, "FRAUD",
+                        np.where(y_pred_proba >= review_t, "REVIEW", "CLEAR"))
+        band_metrics = {}
+        for b in ("CLEAR", "REVIEW", "FRAUD"):
+            mask = band == b
+            band_metrics[f"share_{b.lower()}"] = float(mask.mean())
+            band_metrics[f"fraud_rate_{b.lower()}"] = float(y_test[mask].mean()) if mask.any() else 0.0
 
-        mlflow.log_metrics({"auc_roc": auc, "avg_precision": ap, "f1_score": f1})
-        logger.info("model_metrics", auc_roc=auc, avg_precision=ap, f1_score=f1)
+        mlflow.log_metrics({
+            "auc_roc": auc, "avg_precision": ap, "f1_score": f1,
+            "brier_raw": brier_raw, "brier_calibrated": brier_cal,
+            "review_threshold": review_t, "fraud_threshold": fraud_t,
+            **band_metrics,
+        })
+        logger.info("model_metrics", auc_roc=auc, avg_precision=ap, f1_score=f1,
+                    brier_raw=brier_raw, brier_calibrated=brier_cal)
         print(f"\n{'='*50}")
         print(f"AUC-ROC:         {auc:.4f}")
         print(f"Avg Precision:   {ap:.4f}")
-        print(f"F1 Score:        {f1:.4f}")
+        print(f"F1 @ FRAUD band: {f1:.4f}")
+        print(f"Brier:           {brier_raw:.4f} raw → {brier_cal:.4f} calibrated")
+        print(f"Thresholds:      REVIEW ≥ {review_t:.3f} · FRAUD ≥ {fraud_t:.3f} (calibrated prob)")
+        for b in ("CLEAR", "REVIEW", "FRAUD"):
+            print(f"  {b:<7} {band_metrics[f'share_{b.lower()}']:6.1%} of test traffic, "
+                  f"fraud rate {band_metrics[f'fraud_rate_{b.lower()}']:.1%}")
         print(f"Data source:     {'IEEE-CIS (real)' if ieee_cis else 'Synthetic'}")
         print(f"{'='*50}\n")
 
@@ -391,10 +446,17 @@ def train(
             "feature_cols": feature_cols,
             "data_source": "ieee_cis" if ieee_cis else "synthetic",
             "auc_roc": auc,
+            "review_threshold": review_t,
+            "fraud_threshold": fraud_t,
         }
         with open(MODEL_DIR / model_pkl_name.replace(".pkl", "_meta.json"), "w") as f:
             import json
             json.dump(feature_meta, f, indent=2)
+
+        calibration = {"calibrator": calibrator, "review_threshold": review_t, "fraud_threshold": fraud_t}
+        with open(_calibration_path(model_pkl_name), "wb") as f:
+            pickle.dump(calibration, f)
+        mlflow.log_artifact(str(_calibration_path(model_pkl_name)))
 
         if label_encoder is not None:
             with open(MODEL_DIR / "label_encoder.pkl", "wb") as f:
@@ -411,8 +473,16 @@ def train(
 
 def load_model() -> tuple[xgb.XGBClassifier, LabelEncoder, shap.TreeExplainer]:
     import pickle
+    global _calibration
     with open(MODEL_DIR / "fraud_detector.pkl", "rb") as f:
         model = pickle.load(f)
+    cal_path = _calibration_path("fraud_detector.pkl")
+    if cal_path.exists():
+        with open(cal_path, "rb") as f:
+            _calibration = pickle.load(f)
+    else:
+        logger.warning("calibration_missing", path=str(cal_path),
+                       note="scoring on raw probabilities — retrain to calibrate")
     with open(MODEL_DIR / "label_encoder.pkl", "rb") as f:
         label_encoder = pickle.load(f)
     explainer = shap.TreeExplainer(model)
@@ -446,6 +516,12 @@ def score_transaction(
     feature_df = pd.DataFrame(features, columns=FEATURE_COLS)
 
     fraud_prob = float(model.predict_proba(feature_df)[0, 1])
+    if _calibration is not None:
+        fraud_prob = float(_calibration["calibrator"].predict([fraud_prob])[0])
+        risk_score = _risk_score(fraud_prob, _calibration["review_threshold"],
+                                 _calibration["fraud_threshold"])
+    else:
+        risk_score = fraud_prob * 100
     shap_vals = explainer.shap_values(feature_df)[0]
     top_features = sorted(
         zip(FEATURE_COLS, shap_vals.tolist()),
@@ -457,7 +533,6 @@ def score_transaction(
     if latency_ms > 100:
         logger.warning("slow_inference", latency_ms=round(latency_ms, 2), txn_id=txn.get("txn_id"))
 
-    risk_score = fraud_prob * 100
     if risk_score >= 75:
         decision = "FRAUD"
     elif risk_score >= 40:

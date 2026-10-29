@@ -36,7 +36,10 @@ async def get_drift_report(feature: Optional[str] = Query(None)):
         rows = cur.fetchall()
         cur.close()
         conn.close()
-        drift_detected = any(r["drift_detected"] for r in rows)
+        # Per-row drift_detected is also true for MONITOR (0.10–0.20); only a
+        # feature in the RETRAIN band should escalate the overall recommendation.
+        from governance.drift_monitor import interpret_psi
+        drift_detected = any(interpret_psi(float(r["psi_score"])) == "RETRAIN" for r in rows)
         return {
             "drift_detected": drift_detected,
             "recommendation": "RETRAIN_REQUIRED" if drift_detected else "NO_ACTION",
