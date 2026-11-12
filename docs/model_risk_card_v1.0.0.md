@@ -203,13 +203,18 @@ Measured across 20 consecutive requests in integration test suite:
 
 > End-to-end request latency (including DB audit write + Kafka publish) is higher (~50–200ms) but model inference consistently meets the < 100ms SLA.
 
-**WebSocket load test results (50 concurrent clients, 60 seconds):**
+**Load test — measured 2026-11-11** (`tests/load/locustfile_ws.py`, Locust, 50 concurrent users, 60 s, single local uvicorn worker on an M-series Mac):
 
-| Metric | Target | Status |
-|---|---|---|
-| POST /score p99 | < 100ms | Run `locust -f tests/load/locustfile_ws.py` to verify |
-| WS broadcast p95 | < 200ms | Tested via `tests/load/locustfile_ws.py` |
-| Concurrent WS connections | 50 | No message loss observed |
+| Metric | Result | Target | Status |
+|---|---|---|---|
+| Requests / failures | 939 / **0** | 0 failures | ✓ |
+| `POST /score/` end-to-end p50 / p95 / p99 | 17 / 62 / 120 ms | — | — |
+| WebSocket broadcast p95 | **62 ms** | < 200 ms | ✓ |
+| Server errors on client disconnect | 0 (was 25 before fix) | 0 | ✓ |
+
+> The < 100 ms SLA covers **model inference** (~3 ms). End-to-end `/score/` p99 of 120 ms also includes the Postgres audit write and Kafka publish, both done synchronously in the request today. Moving them to a background task is the next latency lever.
+>
+> The load test found a race in the WebSocket `ConnectionManager`: `broadcast()` dropped dead sockets and the disconnect handler then removed them again (`ValueError`, 25× per run, reported to clients as close code 1011). Fixed by using a set with `discard()` and broadcasting over a snapshot.
 
 ---
 
@@ -254,10 +259,13 @@ Measured across 20 consecutive requests in integration test suite:
 ## 11. Limitations & Known Gaps
 
 1. **IEEE-CIS V-features are opaque:** The top SHAP features (`V258`, `V201`, etc.) are Vesta-proprietary engineered features. Their exact construction is not publicly documented. In production, the bank would have access to equivalent proprietary features from their own transaction history.
-2. **No demographic fairness on IEEE-CIS:** Real protected-class attributes (age, race, gender) are absent from the dataset. Proxy-based fairness (billing region, card network) has been architecturally implemented and is ready to be swapped in.
+2. **No fairness audit on the IEEE-CIS model yet:** The dataset has no protected-class attributes (age, race, gender). The Fairlearn gate in `governance/fairness_gate.py` currently runs only on the synthetic model. A proxy-attribute audit (billing region `addr1`, card network `card4`) is the planned next step and is **not implemented**.
 3. **Synthetic fairness gate (0.055 > 0.05):** `account_age_group` predictive parity slightly exceeds threshold on the synthetic model. Documented as a known artifact of fewer velocity features for new accounts. Recalibration recommended before production.
 4. **K8s on EKS:** Manifests written and tested on minikube. Not deployed to AWS EKS. Interview answer: *"Architected for EKS; local demo on minikube."*
 5. **Gemini free-tier rate limit:** Agent uses Gemini Flash (15 RPM). Production should use a paid key or Claude API.
+6. **API serves the synthetic model:** `/score/` uses the calibrated synthetic `fraud_detector` (7 features the API can compute from a request). `fraud_detector_ieee` needs 318 Vesta features a live request does not carry, so it is an offline validation model, not the serving model.
+
+**Explanation consistency (fixed 2026-11-11):** after probability calibration was added to `/score/`, the Dice-ML explainer still reported raw-probability scores (e.g. 92.3 vs a 49.5 decision). Both paths now go through `fraud_detector.to_policy_score()`, so an adverse-action explanation always quotes the score the decision was made on (FCRA §615(a)).
 
 ---
 

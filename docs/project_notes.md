@@ -163,6 +163,64 @@ Synthetic Transactions (150K)
 
 ---
 
+> **Issues 19–25 were found on 2026-11-11 by actually *running* the Spark end-to-end test and the load test for the first time.** Both had been written in the previous session but never executed. Lesson: a test that has never run is a claim, not evidence.
+
+### 19. Spark streaming job had never worked — Kafka connector missing
+**What happened:** The first real run failed with `Failed to find data source: kafka`. PySpark doesn't bundle the Kafka source; it needs the `spark-sql-kafka-0-10` package. The streaming job had been "built" for months without ever reading a Kafka message.  
+**Fix:** `spark.jars.packages = org.apache.spark:spark-sql-kafka-0-10_2.12:<pyspark version>`, with the version derived from `pyspark.__version__` so they can't drift.  
+**Interview topic:** Spark connector packaging (`--packages` vs `--jars`, Scala binary version matching). And more broadly: the difference between code that exists and code that's been exercised end-to-end.
+
+---
+
+### 20. `startingOffsets = latest` silently skipped every test message
+**What happened:** With the connector fixed, the job exited 0 but wrote zero rows. On a first run with no checkpoint, `latest` means "start after the newest message", so everything published before the job started was ignored.  
+**Fix:** `--once` mode (which drains a backlog) uses `earliest`; continuous mode keeps `latest`. After the first run the checkpoint decides the resume point either way.  
+**Interview topic:** Kafka offset semantics: `startingOffsets` / `auto.offset.reset` only apply when there's no committed offset or checkpoint. A very common source of "my consumer sees nothing" bugs.
+
+---
+
+### 21. Windowed aggregates + primary keys = duplicate-key crash waiting to happen
+**What happened:** Spark's `update` output mode re-emits a window every time it changes, and reruns reprocess old windows. The feature tables have `PRIMARY KEY (account_id, window_start)`, so plain JDBC `append` would crash on the second emission.  
+**Fix:** Stage-then-merge. JDBC-overwrite each micro-batch into `mart._stg_<table>`, then `INSERT … SELECT … ON CONFLICT DO UPDATE` into the real table. Verified by rerunning the job twice: same counts, no errors (each test account shows exactly 20 txns / $3,900).  
+**Interview topic:** Idempotent sinks and exactly-once *effect* with at-least-once delivery. Upserts keyed on the natural key are how you make streaming writes safe to replay.
+
+---
+
+### 22. WebSocket race condition found by the load test
+**What happened:** Under 50 concurrent clients the server logged `ValueError: list.remove(x): x not in list` 25 times per run (clients saw close code 1011). `broadcast()` removed a dead socket after a failed send; then the endpoint's disconnect handler removed it again. `broadcast()` also iterated the list while awaiting, so concurrent disconnects mutated it mid-loop.  
+**Fix:** `set` + `discard()` (idempotent removal) and broadcast over a snapshot `list(self.active)`. Errors went to 0 and latency improved (p95 120 → 62 ms) because dead sockets stopped throwing on every broadcast.  
+**Interview topic:** Shared mutable state across `await` points in asyncio. Single-threaded doesn't mean race-free: every `await` is a point where other coroutines run.
+
+---
+
+### 23. The explanation quoted a different score than the decision
+**What happened:** After probability calibration was added to `/score`, the Dice-ML counterfactual explainer still used raw model probabilities. For the same transaction `/score` said **49.5 (REVIEW)** while the explanation said **92.3**.  
+**Fix:** One function, `fraud_detector.to_policy_score()`, maps raw probability → calibrated probability → 0–100 policy score. Both `/score` and the explainer call it. A first version lazy-loaded the calibration file inside that function, which broke a unit test by making scoring depend on files on disk; the final version loads calibration explicitly in each component's `load` step.  
+**Interview topic:** Single source of truth for model outputs. For credit decisions this is a compliance issue: an FCRA §615(a) adverse-action notice must explain the score the decision was actually made on.
+
+---
+
+### 24. Flaky Kafka consumer test — `subscribe()` races the group join
+**What happened:** `test_high_risk_score_publishes_fraud_alert` failed even though the alert *was* on the topic (verified with `kafka-console-consumer`). The test subscribed with `auto.offset.reset=latest` and polled 1 s "to seek"; the consumer-group join took longer, so the partition was assigned after the alert was produced and `latest` started past it.  
+**Fix:** `assign()` each partition explicitly at its current high-watermark *before* producing, then poll until the matching `txn_id` arrives (other traffic may also be alerting).  
+**Interview topic:** `subscribe()` (group-managed, async rebalance) vs `assign()` (manual, immediate). How to write deterministic tests against async messaging systems.
+
+---
+
+### 25. Moving the project folder broke paths in four places
+**What happened:** The repo moved from `Desktop/CreditPulse` to `Desktop/Projects /CreditPulse`. `.env` (`JDBC_JAR`), `CLAUDE.md`, `RUNNING.md` and a Kafka test still hardcoded the old path, and the new path contains a space, which broke unquoted shell commands.  
+**Fix:** Tests derive paths from `Path(__file__)`; docs quote the path.  
+**Interview topic:** Never hardcode absolute paths. Resolve relative to the source file or take config from the environment, and quote paths in shell scripts.
+
+---
+
+### 26. Kafka wouldn't start — stale broker registration in ZooKeeper
+**What happened:** After Docker Desktop was shut down uncleanly, Kafka exited on startup with `KeeperException$NodeExistsException`. ZooKeeper still held the old broker's ephemeral `/brokers/ids/1` node from a session that hadn't expired yet.  
+**Fix:** Restart ZooKeeper (expiring the old session), then start Kafka.  
+**Interview topic:** ZooKeeper ephemeral nodes and session timeouts, and why newer Kafka uses KRaft mode (no ZooKeeper) instead.
+
+---
+
 ## Final Project Status
 
 | Component | Status | Test coverage |
@@ -180,7 +238,7 @@ Synthetic Transactions (150K)
 | LangChain ReAct agent | ✅ | integration/test_agent.py |
 | FAISS RAG (8 regulatory docs) | ✅ | integration/test_agent.py |
 | FastAPI (16 routes) | ✅ | integration/test_*.py |
-| WebSocket live feed | ✅ | tests/load/locustfile_ws.py (50 concurrent clients) |
+| WebSocket live feed | ✅ | Load-tested: 50 users, 0 failures, broadcast p95 62 ms |
 | React dashboard (5 pages) | ✅ | (manual) |
 | Kiro specs (3) | ✅ | — |
 | Kiro hooks (3) | ✅ | — |
@@ -189,16 +247,19 @@ Synthetic Transactions (150K)
 | K8s + KEDA manifests | ✅ | — |
 | Model risk card | ✅ | docs/model_risk_card_v1.0.0.md |
 | Unit tests | ✅ 15/15 | tests/unit/ |
-| Integration tests | ✅ 105/105 | tests/integration/ |
-| Spark streaming E2E test | ✅ | tests/integration/test_spark_streaming.py |
-| WebSocket load test | ✅ | tests/load/locustfile_ws.py |
+| Integration tests | ✅ 117/117 excl. agent | tests/integration/ (2026-11-11) |
+| Agent tests | ⚠ not rerun 2026-11-11 | 11 tests; need a (rotated) Gemini key |
+| Spark streaming E2E test | ✅ 7/7, verified | tests/integration/test_spark_streaming.py |
+| WebSocket load test | ✅ verified | 939 req, 0 failures, /score/ p95 62 ms |
 | IEEE-CIS real dataset | ✅ | 590K rows in raw.ieee_cis_transactions |
-| IEEE-CIS model (AUC 0.90+) | ✅ | models/artifacts/fraud_detector_ieee.pkl |
+| IEEE-CIS model (AUC 0.9686) | ✅ offline validation model | models/artifacts/fraud_detector_ieee.pkl |
+| IEEE-CIS fairness audit | ❌ not implemented | planned: proxy attributes addr1 / card4 |
+| EKS deployment | ❌ minikube only | honest gap — "architected for EKS" |
 | `.env` with Gemini key | ✅ | — |
 | Spark JDBC JAR | ✅ | spark/jars/ |
 | CLAUDE.md | ✅ | — |
 
-**The project is complete. All original gaps closed.**
+**Status (2026-11-11):** every component is built and the test suite passes (132/132 excl. agent). Two known gaps remain and are documented rather than hidden: no fairness audit on the IEEE-CIS model, and no real EKS deployment.
 
 ---
 
@@ -280,7 +341,7 @@ Based directly on the issues above and what each target company cares about:
 ### How to start the stack in a new session
 
 ```bash
-cd /Users/anshita/Desktop/CreditPulse
+cd "/Users/anshita/Desktop/Projects /CreditPulse"
 
 # 1. Start Docker
 open -a Docker && sleep 15
@@ -290,17 +351,16 @@ docker-compose -f infra/docker/docker-compose.yml up -d postgres kafka redis zoo
 set -a && source .env && set +a
 
 # 3. Start API
-PYTHONPATH=/Users/anshita/Desktop/CreditPulse \
+PYTHONPATH="/Users/anshita/Desktop/Projects /CreditPulse" \
 nohup /opt/anaconda3/envs/talentlens/bin/uvicorn api.main:app --port 8000 \
   > /tmp/creditpulse-api.log 2>&1 &
 sleep 10 && curl -s http://127.0.0.1:8000/health/ready
 
 # 4. Run tests
-PYTHONPATH=/Users/anshita/Desktop/CreditPulse \
-pytest tests/integration/ \
-  --ignore=tests/integration/test_agent.py \
-  --ignore=tests/integration/test_kafka.py -v
-# → 105/105 PASS
+PYTHONPATH="/Users/anshita/Desktop/Projects /CreditPulse" JAVA_HOME=/opt/anaconda3 \
+/opt/anaconda3/envs/talentlens/bin/python -m pytest tests/unit tests/integration/ \
+  --ignore=tests/integration/test_agent.py -v
+# → 132/132 PASS (15 unit + 117 integration, 2026-11-11)
 
 # 5. Start frontend (separate terminal)
 cd frontend && npm run dev -- --port 5174
@@ -310,4 +370,4 @@ cd frontend && npm run dev -- --port 5174
 - **Account history tests** (2 tests) skip because `inttest-explain-acct` scored transactions are recent — they'll pass once a week has passed
 - **Agent tests** run ~60s due to 5s rate limit guard between Gemini calls
 - **Fairness gate** returns `gate_passed=False` on the synthetic test data (account_age_group predictive parity is 0.055, slightly above 0.05 threshold) — this is documented in the model risk card as a known gap, not a bug
-- **Spark streaming** needs Kafka running + JDBC JAR (both now present) but hasn't been end-to-end tested
+- **Spark streaming** is end-to-end tested (Kafka → Spark → Postgres, 7/7 on 2026-11-11); first run downloads the Kafka connector from Maven

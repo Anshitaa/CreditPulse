@@ -70,7 +70,7 @@ Synthetic Transactions (150K, 12.5% fraud rate)
 - Sub-100ms p99 inference via XGBoost + pre-computed Feast features
 - Composite decision: **FRAUD** (score > 75) / **REVIEW** (40–75) / **CLEAR** (< 40)
 - Live WebSocket feed — watch scores stream in real time
-- Two trained models: synthetic baseline (AUC 0.681) and IEEE-CIS real-data model (AUC 0.90+)
+- Two trained models: synthetic baseline (AUC 0.681) and IEEE-CIS real-data model (AUC 0.9686)
 
 ### Explainability
 - **SHAP** — top-5 feature contributions per transaction
@@ -124,22 +124,19 @@ cd frontend && npm install && npm run dev -- --port 5174
 ## Testing
 
 ```bash
-export PYTHONPATH=$(pwd)
+export PYTHONPATH="$(pwd)" JAVA_HOME=/opt/anaconda3
 
 # Unit tests — no Docker needed (15 tests)
 pytest tests/unit/test_models.py -v
 
-# Integration tests — requires Docker stack + API running (105 tests)
-pytest tests/integration/ \
-  --ignore=tests/integration/test_agent.py \
-  --ignore=tests/integration/test_kafka.py \
-  -v
+# Integration tests incl. Kafka + Spark — requires Docker stack + API running (117 tests)
+pytest tests/integration/ --ignore=tests/integration/test_agent.py -v
 
-# Spark streaming end-to-end — Kafka → Spark → PostgreSQL
-export JAVA_HOME=/opt/anaconda3
+# Spark streaming end-to-end only — Kafka → Spark → PostgreSQL (7 tests)
 pytest tests/integration/test_spark_streaming.py -v -s
 
 # WebSocket load test — 50 concurrent clients, 60 seconds
+# Measured: 939 requests, 0 failures, /score/ p95 62 ms, WS broadcast p95 62 ms
 locust -f tests/load/locustfile_ws.py \
        --headless -u 50 -r 5 -t 60s \
        --host http://127.0.0.1:8000 \
@@ -177,7 +174,7 @@ api/
 frontend/                          # React dashboard (5 pages)
 tests/
   unit/test_models.py              # 15 unit tests
-  integration/                     # 105+ integration tests
+  integration/                     # 128 integration tests (incl. Kafka + Spark E2E)
 docs/model_risk_card_v1.0.0.md    # OCC SR 11-7 model risk card
 infra/docker/docker-compose.yml   # Postgres · Kafka · Redis · Zookeeper
 infra/k8s/                         # Kubernetes manifests + KEDA ScaledObject

@@ -12,9 +12,9 @@ Auto-loaded by Claude Code on every session.
 | Phase | Status | Checkpoint |
 |---|---|---|
 | 1 — Synthetic Data | ✅ Built | 150K transactions, 12.5% fraud rate, loaded to `raw.transactions` |
-| 2 — Spark Streaming Features | ✅ Built | `--once` mode added; end-to-end test in `test_spark_streaming.py` |
+| 2 — Spark Streaming Features | ✅ Verified | Kafka → Spark → Postgres passing end-to-end (`test_spark_streaming.py`, 7/7); idempotent stage-then-merge upserts |
 | 3 — ML Models (synthetic) | ✅ Built | `fraud_detector.pkl` AUC 0.681 (synthetic ceiling — documented) |
-| 3b — ML Models (IEEE-CIS) | ✅ Built | `fraud_detector_ieee.pkl` trained on 590K real Vesta transactions; AUC 0.90+ |
+| 3b — ML Models (IEEE-CIS) | ✅ Built | `fraud_detector_ieee.pkl` trained on 590K real Vesta transactions; AUC 0.9686 |
 | 4 — SHAP + Counterfactuals | ✅ Built | Dice-ML + SHAP top-5 per transaction |
 | 5 — Fairness + Drift | ✅ Built | Fairlearn gate + PSI monitor → `audit.*` tables |
 | 6 — LLM Agent | ✅ Built | LangChain ReAct + FAISS RAG (16 chunks, 8 regulatory docs) |
@@ -23,8 +23,8 @@ Auto-loaded by Claude Code on every session.
 | 9 — Kiro Specs + Hooks | ✅ Built | 3 EARS specs, 3 hooks, 3 MCP servers |
 | 10 — Docker + K8s | ✅ Built | docker-compose + minikube manifests + KEDA ScaledObject |
 | 11 — Unit Tests | ✅ Built | 15/15 passing (`tests/unit/test_models.py`) |
-| 12 — Integration Tests | ✅ Built | 105/105 passing (`tests/integration/`) |
-| 13 — Load Tests | ✅ Built | Locust WebSocket load test — 50 concurrent clients (`tests/load/`) |
+| 12 — Integration Tests | ✅ Built | 117/117 passing excl. agent (`tests/integration/`, 2026-11-11); 11 agent tests need a Gemini key |
+| 13 — Load Tests | ✅ Verified | 50 users / 60 s: 939 req, 0 failures, `/score/` p95 62 ms, WS broadcast p95 62 ms |
 | 14 — Real Dataset (IEEE-CIS) | ✅ Built | 590K Vesta transactions in `raw.ieee_cis_transactions` |
 
 ---
@@ -50,7 +50,7 @@ Auto-loaded by Claude Code on every session.
 - **PostgreSQL port: 5435** (not 5432/5433 — Mac has 3 Postgres instances)
 - **Conda env:** `talentlens` (shared with TalentLens project)
 - **Python:** `/opt/anaconda3/envs/talentlens/bin/python`
-- **MLFLOW_TRACKING_URI:** `file:///Users/anshita/Desktop/CreditPulse/mlruns` (file-based, no server needed)
+- **MLFLOW_TRACKING_URI:** `file:///Users/anshita/Desktop/Projects /CreditPulse/mlruns` (file-based, no server needed)
 - **Frontend port:** 5174 (not 5173 — avoids TalentLens conflict)
 - **DATABASE_URL:** `postgresql://creditpulse:creditpulse@localhost:5435/creditpulse`
 - **Java for PySpark:** `export JAVA_HOME=/opt/anaconda3`
@@ -62,7 +62,7 @@ Auto-loaded by Claude Code on every session.
 ## Quick Start (Full Stack)
 
 ```bash
-cd /Users/anshita/Desktop/CreditPulse
+cd "/Users/anshita/Desktop/Projects /CreditPulse"
 
 # ── 1. Start Docker infrastructure ──────────────────────────────────────────
 open -a Docker && sleep 15
@@ -72,7 +72,7 @@ docker-compose -f infra/docker/docker-compose.yml up -d postgres kafka redis zoo
 set -a && source .env && set +a
 
 # ── 3. Start API (Terminal 1) ─────────────────────────────────────────────────
-PYTHONPATH=/Users/anshita/Desktop/CreditPulse \
+PYTHONPATH="/Users/anshita/Desktop/Projects /CreditPulse" \
   /opt/anaconda3/envs/talentlens/bin/uvicorn api.main:app --port 8000
 
 # ── 4. Start frontend (Terminal 2) ───────────────────────────────────────────
@@ -94,18 +94,17 @@ curl http://127.0.0.1:8000/health/ready
 
 ```bash
 set -a && source .env && set +a
-export PYTHONPATH=/Users/anshita/Desktop/CreditPulse
+export PYTHONPATH="/Users/anshita/Desktop/Projects /CreditPulse"
 
 # Unit tests (no Docker needed)
 pytest tests/unit/test_models.py -v
 # → 15/15 PASS
 
-# Integration tests (requires Docker stack + API running)
-pytest tests/integration/ \
-  --ignore=tests/integration/test_agent.py \
-  --ignore=tests/integration/test_kafka.py \
-  -v
-# → 105/105 PASS
+# Integration tests incl. Kafka + Spark (requires Docker stack + API running)
+# Use the talentlens env: /opt/anaconda3/envs/talentlens/bin/python -m pytest ...
+export JAVA_HOME=/opt/anaconda3
+pytest tests/integration/ --ignore=tests/integration/test_agent.py -v
+# → 117/117 PASS (2026-11-11)
 
 # Agent tests (slow — Gemini rate limit guard, ~60s)
 pytest tests/integration/test_agent.py -v
@@ -116,7 +115,9 @@ pytest tests/integration/test_kafka.py -v
 # Spark streaming end-to-end (requires Docker + JAVA_HOME)
 export JAVA_HOME=/opt/anaconda3
 pytest tests/integration/test_spark_streaming.py -v -s
-# → publishes to Kafka, runs Spark --once, verifies PostgreSQL rows
+# → 7/7: publishes to Kafka, runs Spark --once, verifies PostgreSQL rows
+# First run downloads spark-sql-kafka from Maven (needs internet).
+# If Kafka exits with ZooKeeper "NodeExists": docker restart creditpulse-zookeeper, then docker start creditpulse-kafka
 
 # WebSocket load test (requires API running on port 8000)
 mkdir -p tests/load/results
@@ -124,6 +125,7 @@ locust -f tests/load/locustfile_ws.py \
        --headless -u 50 -r 5 -t 60s \
        --host http://127.0.0.1:8000 \
        --csv tests/load/results/ws_load_test
+# → 939 req, 0 failures; /score/ p50/p95/p99 17/62/120 ms; WS broadcast p95 62 ms
 ```
 
 ---
@@ -157,7 +159,7 @@ models/
   counterfactual.py                # Dice-ML counterfactuals
   artifacts/
     fraud_detector.pkl             # Trained on synthetic data (AUC 0.681)
-    fraud_detector_ieee.pkl        # Trained on IEEE-CIS real data (AUC 0.90+)
+    fraud_detector_ieee.pkl        # Trained on IEEE-CIS real data (AUC 0.9686)
 governance/
   fairness_gate.py                 # Fairlearn (3 protected groups, δ < 0.05)
   drift_monitor.py                 # PSI per feature → audit.drift_reports
@@ -170,7 +172,7 @@ api/
 frontend/                          # React 5-page dashboard (Vite + Recharts)
 tests/
   unit/test_models.py              # 15 unit tests
-  integration/                     # 105+ integration tests (6 files + agent + kafka + spark)
+  integration/                     # 128 integration tests (incl. kafka, spark E2E, 11 agent)
   load/locustfile_ws.py            # Locust WebSocket load test (50 concurrent clients)
 docs/
   model_risk_card_v1.0.0.md        # OCC SR 11-7 model risk card (real IEEE-CIS metrics)

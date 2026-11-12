@@ -12,7 +12,7 @@ Built spec-first with Kiro · Stack: Kafka + Spark + XGBoost + SHAP + Dice-ML + 
 conda activate talentlens
 
 # Install dependencies
-cd /Users/anshita/Desktop/CreditPulse
+cd "/Users/anshita/Desktop/Projects /CreditPulse"
 pip install -r requirements.txt
 
 # Frontend
@@ -28,7 +28,7 @@ cp .env.example .env
 ## Phase 0 — Start Infrastructure
 
 ```bash
-cd /Users/anshita/Desktop/CreditPulse
+cd "/Users/anshita/Desktop/Projects /CreditPulse"
 
 # Start Postgres (port 5435), Kafka, Redis, MLflow
 docker-compose -f infra/docker/docker-compose.yml up -d postgres kafka redis mlflow schema-registry
@@ -60,7 +60,7 @@ docker exec creditpulse-postgres psql -U creditpulse -d creditpulse \
 
 ```bash
 export JAVA_HOME=/opt/anaconda3
-export JDBC_JAR=/Users/anshita/Desktop/CreditPulse/spark/jars/postgresql-42.7.3.jar
+export JDBC_JAR="/Users/anshita/Desktop/Projects /CreditPulse/spark/jars/postgresql-42.7.3.jar"
 export POSTGRES_HOST=localhost
 export POSTGRES_PORT=5435
 
