@@ -65,6 +65,9 @@ class CounterfactualEngine:
             self._model = pickle.load(f)
         with open(MODEL_DIR / "label_encoder.pkl", "rb") as f:
             self._label_encoder = pickle.load(f)
+        # Report scores on the same calibrated scale /score decides on.
+        from models.fraud_detector import load_calibration
+        load_calibration()
         self._setup_dice()
 
     def _setup_dice(self):
@@ -136,8 +139,13 @@ class CounterfactualEngine:
             "merchant_category_encoded": cat_encoded,
         }])
 
-        original_prob = float(self._model.predict_proba(query_instance)[0, 1])
-        original_score = round(original_prob * 100, 2)
+        # Same calibrated 0–100 scale as /score, so the explanation quotes the
+        # score the decision was actually made on.
+        from models.fraud_detector import to_policy_score
+        original_prob, original_score = to_policy_score(
+            float(self._model.predict_proba(query_instance)[0, 1])
+        )
+        original_score = round(original_score, 2)
 
         try:
             cfs = self._dice_explainer.generate_counterfactuals(
@@ -155,7 +163,9 @@ class CounterfactualEngine:
         counterfactuals = []
         if cf_df is not None and len(cf_df) > 0:
             for _, cf_row in cf_df.iterrows():
-                cf_prob = float(self._model.predict_proba(cf_row[ALL_FEATURES].to_frame().T)[0, 1])
+                cf_prob, cf_score = to_policy_score(float(
+                    self._model.predict_proba(cf_row[ALL_FEATURES].to_frame().T)[0, 1]
+                ))
                 changes = []
                 for feat in ALL_FEATURES:
                     orig_val = query_instance[feat].iloc[0]
@@ -179,7 +189,7 @@ class CounterfactualEngine:
                 if changes:
                     counterfactuals.append({
                         "target_fraud_probability": round(cf_prob, 4),
-                        "target_risk_score": round(cf_prob * 100, 2),
+                        "target_risk_score": round(cf_score, 2),
                         "changes": changes,
                         "feasibility": "actionable" if len(changes) <= 2 else "requires_multiple_changes",
                     })

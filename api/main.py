@@ -141,25 +141,27 @@ async def readiness():
 
 class ConnectionManager:
     def __init__(self):
-        self.active: list[WebSocket] = []
+        self.active: set[WebSocket] = set()
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
-        self.active.append(ws)
+        self.active.add(ws)
 
     def disconnect(self, ws: WebSocket):
-        self.active.remove(ws)
+        # discard, not remove: broadcast() may already have dropped this socket
+        # after a failed send, and the endpoint's disconnect handler runs after.
+        self.active.discard(ws)
 
     async def broadcast(self, message: dict):
         import json
-        dead = []
-        for ws in self.active:
+        payload = json.dumps(message, default=str)
+        # Iterate a snapshot: connect/disconnect can mutate the set while we
+        # await each send.
+        for ws in list(self.active):
             try:
-                await ws.send_text(json.dumps(message, default=str))
+                await ws.send_text(payload)
             except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.active.remove(ws)
+                self.active.discard(ws)
 
 
 manager = ConnectionManager()

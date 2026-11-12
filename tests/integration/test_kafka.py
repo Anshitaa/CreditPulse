@@ -10,9 +10,12 @@ Covers:
 
 import json
 import time
+from pathlib import Path
+
 import pytest
 
 KAFKA_BOOTSTRAP = "localhost:9092"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 try:
     from confluent_kafka import Producer, Consumer, KafkaException
@@ -104,7 +107,7 @@ class TestKafkaProducer:
         result = subprocess.run(
             [sys.executable, "ingestion/kafka/producer.py", "--mode", "simulate", "--rate", "5", "--duration", "3"],
             capture_output=True, text=True, timeout=15,
-            cwd="/Users/anshita/Desktop/CreditPulse",
+            cwd=PROJECT_ROOT,
         )
         assert result.returncode == 0, (
             f"Kafka producer script failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
@@ -116,14 +119,21 @@ class TestKafkaProducer:
         """Scoring a txn with risk > 75 should publish to alerts.fraud.
         Spec: CREDIT-001 FR-003 — publish HIGH-RISK alert if score > 75."""
         import httpx
+        from confluent_kafka import TopicPartition
         consumer = Consumer({
             "bootstrap.servers": KAFKA_BOOTSTRAP,
             "group.id": "inttest-fraud-alerts",
-            "auto.offset.reset": "latest",
             "enable.auto.commit": False,
         })
-        consumer.subscribe(["alerts.fraud"])
-        consumer.poll(timeout=1.0)  # seek to latest
+        # Pin every partition to its current end offset *before* scoring.
+        # subscribe() + "latest" races the group join: if assignment lands after
+        # the alert is produced, "latest" starts past it and the test misses it.
+        partitions = consumer.list_topics("alerts.fraud", timeout=5).topics["alerts.fraud"].partitions
+        consumer.assign([
+            TopicPartition("alerts.fraud", p,
+                           consumer.get_watermark_offsets(TopicPartition("alerts.fraud", p), timeout=5)[1])
+            for p in partitions
+        ])
 
         with httpx.Client(base_url="http://127.0.0.1:8000", timeout=10) as client:
             payload = {
@@ -141,11 +151,22 @@ class TestKafkaProducer:
             score_data = resp.json()
 
         if score_data["fraud_risk_score"] <= 75:
+            consumer.close()
             pytest.skip(f"Score {score_data['fraud_risk_score']:.1f} ≤ 75 — no alert expected")
 
-        msg = consumer.poll(timeout=5.0)
-        consumer.close()
-        assert msg is not None, "No message received in alerts.fraud within 5s"
-        assert not msg.error(), f"Kafka consumer error: {msg.error()}"
-        alert = json.loads(msg.value().decode())
-        assert alert["txn_id"] == payload["txn_id"]
+        # Other traffic may also be alerting; wait for *this* transaction's alert.
+        alert, deadline = None, time.time() + 10
+        try:
+            while time.time() < deadline:
+                msg = consumer.poll(timeout=1.0)
+                if msg is None:
+                    continue
+                assert not msg.error(), f"Kafka consumer error: {msg.error()}"
+                candidate = json.loads(msg.value().decode())
+                if candidate.get("txn_id") == payload["txn_id"]:
+                    alert = candidate
+                    break
+        finally:
+            consumer.close()
+        assert alert is not None, f"No alert for {payload['txn_id']} on alerts.fraud within 10s"
+        assert alert["decision"] == "FRAUD"

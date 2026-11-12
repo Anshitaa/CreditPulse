@@ -76,7 +76,7 @@ class ScoreAndWatch(HttpUser):
         t0 = time.perf_counter()
 
         with self.client.post(
-            "/score",
+            "/score/",  # canonical path; "/score" costs an extra 307 round-trip
             json=txn,
             catch_response=True,
             name="POST /score",
@@ -134,7 +134,7 @@ class ScoreAndWatch(HttpUser):
             "amount_vs_avg_ratio": round(random.uniform(0.5, 3.0), 2),
         }
         with self.client.post(
-            "/score",
+            "/score/",  # canonical path; "/score" costs an extra 307 round-trip
             json=txn,
             catch_response=True,
             name="POST /score (REST only)",

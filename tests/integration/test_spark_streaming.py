@@ -14,7 +14,7 @@ Requirements:
 
 Run:
     export JAVA_HOME=/opt/anaconda3
-    export PYTHONPATH=/Users/anshita/Desktop/CreditPulse
+    export PYTHONPATH="/Users/anshita/Desktop/Projects /CreditPulse"
     pytest tests/integration/test_spark_streaming.py -v -s
 """
 
@@ -29,8 +29,8 @@ from pathlib import Path
 
 import psycopg2
 import pytest
-from kafka import KafkaProducer
-from kafka.errors import NoBrokersAvailable
+from confluent_kafka import Producer
+from confluent_kafka.admin import AdminClient
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -48,18 +48,19 @@ JAVA_HOME = os.environ.get("JAVA_HOME", "/opt/anaconda3")
 
 @pytest.fixture(scope="module")
 def kafka_producer():
-    """Create a Kafka producer; skip if Kafka unavailable."""
+    """confluent_kafka Producer (same client the rest of the project uses); skip if Kafka is down."""
     try:
-        producer = KafkaProducer(
-            bootstrap_servers=KAFKA_BOOTSTRAP,
-            value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
-            key_serializer=lambda k: k.encode("utf-8") if k else None,
-            request_timeout_ms=5000,
-        )
-        yield producer
-        producer.close()
-    except NoBrokersAvailable:
+        AdminClient({"bootstrap.servers": KAFKA_BOOTSTRAP}).list_topics(timeout=5)
+    except Exception:
         pytest.skip("Kafka not available at localhost:9092 — start Docker stack first")
+    producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP, "message.timeout.ms": 10000})
+    yield producer
+    producer.flush(10)
+
+
+def publish(producer: Producer, txn: dict) -> None:
+    """Serialize and enqueue one transaction, keyed by txn_id."""
+    producer.produce(TOPIC, key=txn["txn_id"], value=json.dumps(txn, default=str))
 
 
 @pytest.fixture(scope="module")
@@ -138,21 +139,22 @@ class TestKafkaToSparkToPostgres:
     def test_kafka_producer_can_publish(self, kafka_producer):
         """Baseline: can we publish messages to Kafka at all?"""
         txn = make_test_transaction("ACC-E2E-BASELINE", amount=100.0)
-        future = kafka_producer.send(TOPIC, key=txn["txn_id"], value=txn)
-        record_metadata = future.get(timeout=10)
-        assert record_metadata.topic == TOPIC
-        assert record_metadata.offset >= 0
+        delivered = []
+        kafka_producer.produce(
+            TOPIC, key=txn["txn_id"], value=json.dumps(txn, default=str),
+            on_delivery=lambda err, msg: delivered.append((err, msg)),
+        )
+        kafka_producer.flush(10)
+        assert delivered, "No delivery report within 10s"
+        err, msg = delivered[0]
+        assert err is None, f"Delivery failed: {err}"
+        assert msg.topic() == TOPIC
+        assert msg.offset() >= 0
 
     def test_kafka_topic_exists(self, kafka_producer):
         """transactions.raw topic must exist before streaming can consume it."""
-        from kafka import KafkaAdminClient
-        try:
-            admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP)
-            topics = admin.list_topics()
-            assert TOPIC in topics, f"Topic '{TOPIC}' not found. Got: {topics}"
-            admin.close()
-        except Exception as e:
-            pytest.fail(f"Could not list Kafka topics: {e}")
+        topics = AdminClient({"bootstrap.servers": KAFKA_BOOTSTRAP}).list_topics(timeout=5).topics
+        assert TOPIC in topics, f"Topic '{TOPIC}' not found. Got: {list(topics)}"
 
     def test_spark_streaming_end_to_end(
         self, kafka_producer, db_conn, spark_available
@@ -170,9 +172,9 @@ class TestKafkaToSparkToPostgres:
         account_id = f"{self.TEST_ACCOUNT_PREFIX}-{uuid.uuid4().hex[:4]}"
         for i in range(self.N_TEST_TRANSACTIONS):
             txn = make_test_transaction(account_id, amount=100.0 + i * 10)
-            kafka_producer.send(TOPIC, key=txn["txn_id"], value=txn)
+            publish(kafka_producer, txn)
 
-        kafka_producer.flush()
+        assert kafka_producer.flush(10) == 0, "Some test messages were not delivered to Kafka"
         print(f"\nPublished {self.N_TEST_TRANSACTIONS} test transactions for account {account_id}")
 
         # Give Kafka a moment to commit the messages

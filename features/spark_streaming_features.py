@@ -64,24 +64,30 @@ def create_spark(local: bool = False) -> SparkSession:
         "JDBC_JAR",
         str(Path(__file__).parent.parent / "spark/jars/postgresql-42.7.3.jar"),
     )
+    # The Kafka source is not bundled with PySpark; pull the connector that
+    # matches the installed Spark version (pip PySpark 3.x is built on Scala 2.12).
+    import pyspark
+    kafka_pkg = f"org.apache.spark:spark-sql-kafka-0-10_2.12:{pyspark.__version__}"
     builder = (
         SparkSession.builder.appName("CreditPulse-StreamingFeatures")
         .config("spark.sql.streaming.checkpointLocation", "/tmp/creditpulse-checkpoints")
         .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true")
         .config("spark.jars", jdbc_jar)
+        .config("spark.jars.packages", kafka_pkg)
     )
     if local:
         builder = builder.master("local[*]").config("spark.driver.memory", "4g")
     return builder.getOrCreate()
 
 
-def build_streaming_pipeline(spark: SparkSession):
-    # Read from Kafka
+def build_streaming_pipeline(spark: SparkSession, starting_offsets: str = "latest"):
+    # Read from Kafka. startingOffsets only applies on the very first run;
+    # after that the checkpoint decides where to resume.
     raw_stream = (
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", "transactions.raw")
-        .option("startingOffsets", "latest")
+        .option("startingOffsets", starting_offsets)
         .option("failOnDataLoss", "false")
         .load()
     )
@@ -175,14 +181,45 @@ def build_streaming_pipeline(spark: SparkSession):
     return txn_count_1h, velocity_5m, amount_stats, merchant_stats
 
 
-def write_to_postgres(df, table: str, mode: str = "append"):
-    """Write a batch of features to PostgreSQL (offline store)."""
-    df.write.jdbc(
-        url=JDBC_URL,
-        table=f"mart.{table}",
-        mode=mode,
-        properties=JDBC_PROPS,
+FEATURE_TABLE_KEYS = {
+    "features_account_txn_counts": ("account_id", "window_start"),
+    "features_velocity": ("account_id", "window_start"),
+    "features_amount_stats": ("account_id", "window_start"),
+    "features_merchant_stats": ("merchant_id", "window_start"),
+}
+
+
+def write_to_postgres(df, table: str) -> None:
+    """Idempotent upsert of one micro-batch into mart.<table> (offline store).
+
+    In `update` output mode Spark re-emits a window every time it changes, and
+    a rerun reprocesses windows already written. A plain JDBC append would hit
+    the (key, window_start) primary key, so we stage-then-merge:
+      1. JDBC-overwrite the batch into mart._stg_<table>
+      2. INSERT ... SELECT ... ON CONFLICT DO UPDATE into the real table
+    """
+    import psycopg2
+
+    staging = f"mart._stg_{table}"
+    df.write.jdbc(url=JDBC_URL, table=staging, mode="overwrite", properties=JDBC_PROPS)
+
+    keys = FEATURE_TABLE_KEYS[table]
+    cols = df.columns
+    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c not in keys)
+    merge_sql = (
+        f"INSERT INTO mart.{table} ({', '.join(cols)}) "
+        f"SELECT {', '.join(cols)} FROM {staging} "
+        f"ON CONFLICT ({', '.join(keys)}) DO UPDATE SET {updates}"
     )
+    conn = psycopg2.connect(
+        host=POSTGRES_HOST, port=POSTGRES_PORT, dbname="creditpulse",
+        user=JDBC_PROPS["user"], password=JDBC_PROPS["password"],
+    )
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(merge_sql)
+    finally:
+        conn.close()
 
 
 def run_streaming(local: bool = False, once: bool = False) -> None:
@@ -197,7 +234,11 @@ def run_streaming(local: bool = False, once: bool = False) -> None:
     spark = create_spark(local)
     spark.sparkContext.setLogLevel("WARN")
 
-    txn_count_1h, velocity_5m, amount_stats, merchant_stats = build_streaming_pipeline(spark)
+    # --once drains the backlog already sitting in Kafka, so it must start from
+    # "earliest"; "latest" would skip every message published before startup.
+    txn_count_1h, velocity_5m, amount_stats, merchant_stats = build_streaming_pipeline(
+        spark, starting_offsets="earliest" if once else "latest"
+    )
 
     # Write each feature stream to PostgreSQL
     queries = []

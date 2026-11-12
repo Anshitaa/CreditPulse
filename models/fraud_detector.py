@@ -99,6 +99,38 @@ def _risk_score(prob: float, review_t: float, fraud_t: float) -> float:
     return 75 + 25 * (prob - fraud_t) / max(1 - fraud_t, 1e-9)
 
 
+def load_calibration() -> dict | None:
+    """Load the calibrator + band thresholds saved next to fraud_detector.pkl.
+
+    Called by load_model(), and explicitly by any other component that loads
+    the model on its own (e.g. the counterfactual engine). Kept explicit rather
+    than lazy so score_transaction() never silently depends on files on disk.
+    """
+    global _calibration
+    if _calibration is None:
+        cal_path = _calibration_path("fraud_detector.pkl")
+        if cal_path.exists():
+            import pickle
+            with open(cal_path, "rb") as f:
+                _calibration = pickle.load(f)
+    return _calibration
+
+
+def to_policy_score(raw_prob: float) -> tuple[float, float]:
+    """Raw model probability → (calibrated probability, 0–100 policy risk score).
+
+    Single source of truth for every score shown to a user. /score and the
+    counterfactual explainer must both go through this, otherwise an adverse-
+    action explanation can quote a different score than the decision it explains.
+    Uses raw probability × 100 when no calibration has been loaded.
+    """
+    if _calibration is None:
+        return raw_prob, raw_prob * 100
+    prob = float(_calibration["calibrator"].predict([raw_prob])[0])
+    return prob, _risk_score(prob, _calibration["review_threshold"],
+                             _calibration["fraud_threshold"])
+
+
 def load_training_data(parquet_path: str | None = None) -> pd.DataFrame:
     """Load synthetic transaction data from parquet or PostgreSQL."""
     if parquet_path and Path(parquet_path).exists():
@@ -515,13 +547,7 @@ def score_transaction(
     ]])
     feature_df = pd.DataFrame(features, columns=FEATURE_COLS)
 
-    fraud_prob = float(model.predict_proba(feature_df)[0, 1])
-    if _calibration is not None:
-        fraud_prob = float(_calibration["calibrator"].predict([fraud_prob])[0])
-        risk_score = _risk_score(fraud_prob, _calibration["review_threshold"],
-                                 _calibration["fraud_threshold"])
-    else:
-        risk_score = fraud_prob * 100
+    fraud_prob, risk_score = to_policy_score(float(model.predict_proba(feature_df)[0, 1]))
     shap_vals = explainer.shap_values(feature_df)[0]
     top_features = sorted(
         zip(FEATURE_COLS, shap_vals.tolist()),
