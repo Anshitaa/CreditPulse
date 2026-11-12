@@ -170,7 +170,7 @@ The agent has a FAISS index over 8 regulatory documents: PCI DSS, FCRA, Regulati
 
 ## 7. Drift Monitoring (PSI)
 
-Monitoring cadence: weekly (Airflow DAG) + on-demand via `POST /governance/drift/run`.
+Monitoring: on-demand via `POST /governance/drift/run`. Scheduled runs (e.g. a weekly Airflow DAG) are planned, not implemented.
 
 | Feature | PSI | Status | Action |
 |---|---|---|---|
@@ -247,7 +247,7 @@ Measured across 20 consecutive requests in integration test suite:
 | This document | `docs/model_risk_card_v1.0.0.md` |
 
 **Retraining process:**
-1. Drift monitor exceeds PSI threshold → Airflow triggers feature pipeline
+1. Drift monitor exceeds PSI threshold (scheduling not yet automated; run on demand)
 2. `python data/load_ieee_cis.py --load-db` — refresh from source
 3. `python models/fraud_detector.py --train --ieee-cis --n-trials 30`
 4. Fairness gate hook fires automatically on model file save (Kiro)

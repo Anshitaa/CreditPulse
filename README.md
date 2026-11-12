@@ -16,10 +16,10 @@ Synthetic Transactions (150K, 12.5% fraud rate)
   PostgreSQL (raw.*)                                                  alerts.fraud topic
         │
         ▼
-  dbt staging layer (staging.*)
+  PySpark Structured Streaming (1h / 5m / 24h windows)
         │
         ▼
-  PySpark Streaming Features ──→ Feast Feature Store ──→ Redis (online store)
+  PostgreSQL mart.features_*  (idempotent stage-then-merge upserts)
         │
         ▼
   ML Inference Pipeline
@@ -54,7 +54,7 @@ Synthetic Transactions (150K, 12.5% fraud rate)
 |---|---|
 | Event streaming | Kafka (`transactions.raw`, `alerts.fraud`) |
 | Warehouse | PostgreSQL · 4 schemas: `raw / staging / mart / audit` |
-| Feature engineering | PySpark + Feast + Redis (velocity features) |
+| Feature engineering | PySpark Structured Streaming → PostgreSQL feature tables (velocity, amount, merchant windows) |
 | ML | XGBoost · Isolation Forest · SHAP · Dice-ML counterfactuals |
 | Governance | MLflow · Fairlearn · PSI drift monitor |
 | LLM / Agent | LangChain ReAct · FAISS RAG · Gemini Flash (free tier) |
@@ -67,7 +67,8 @@ Synthetic Transactions (150K, 12.5% fraud rate)
 ## Key Features
 
 ### Real-Time Fraud Scoring
-- Sub-100ms p99 inference via XGBoost + pre-computed Feast features
+- ~3 ms XGBoost model inference; `/score/` end-to-end p95 62 ms under 50 concurrent users (incl. audit write + Kafka publish)
+- Isotonic-calibrated probabilities so the 40/75 policy bands mean real fraud rates
 - Composite decision: **FRAUD** (score > 75) / **REVIEW** (40–75) / **CLEAR** (< 40)
 - Live WebSocket feed — watch scores stream in real time
 - Two trained models: synthetic baseline (AUC 0.681) and IEEE-CIS real-data model (AUC 0.9686)
@@ -156,7 +157,7 @@ data/
   synthetic_transactions.py        # Synthetic generator (150K rows, 12.5% fraud)
   load_ieee_cis.py                 # IEEE-CIS ETL — 590K real Vesta transactions
 ingestion/kafka/                   # Idempotent Kafka producer
-features/                          # PySpark streaming features → Feast → Redis (--once for CI)
+features/                          # PySpark streaming features → PostgreSQL (--once for CI)
 models/
   fraud_detector.py                # XGBoost + Optuna HPO + SHAP
   anomaly.py                       # Isolation Forest

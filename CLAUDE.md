@@ -138,7 +138,7 @@ locust -f tests/load/locustfile_ws.py \
 | React Frontend | 5174 | Vite dev server |
 | PostgreSQL | 5435 | Avoid Mac 5432/5433 conflicts |
 | Kafka | 9092 | |
-| Redis | 6379 | Feast online store |
+| Redis | 6379 | Provisioned in docker-compose; not used yet (online feature store planned) |
 | MLflow | file-based | No server — uses `mlruns/` directory |
 
 ---
@@ -151,7 +151,7 @@ data/
   load_ieee_cis.py                 # IEEE-CIS ETL: downloads + loads 590K real Vesta transactions
   ieee_cis/                        # train_transaction.csv + train_identity.csv (gitignored)
 ingestion/kafka/producer.py        # Idempotent Kafka producer (simulate/replay modes)
-features/spark_streaming_features.py  # PySpark → Feast → Redis; --once flag for CI testing
+features/spark_streaming_features.py  # PySpark → PostgreSQL feature tables; --once flag for CI testing
 models/
   fraud_detector.py                # XGBoost + Optuna HPO + SHAP; --ieee-cis flag for real data
   anomaly.py                       # Isolation Forest

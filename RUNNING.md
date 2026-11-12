@@ -211,15 +211,6 @@ chmod +x scripts/minikube-up.sh
 | PostgreSQL | 5435 | Avoid conflict with Mac 5432/5433 |
 | Kafka | 9092 | |
 | Schema Registry | 8081 | |
-| Redis | 6379 | Feast online store |
+| Redis | 6379 | Provisioned in docker-compose; not used yet (online feature store planned) |
 | MLflow | 5001 | Avoid macOS AirPlay on 5000 |
 
----
-
-## Resume Bullets (copy-paste ready)
-
-- "Built real-time fraud detection platform processing 10K events/sec via Kafka + Spark Streaming + Feast, achieving p99 inference latency < 100ms"
-- "Implemented Dice-ML counterfactual explanations + Fairlearn fairness gates enforced as automated Kiro IDE hooks in the development loop"
-- "Developed 3 production MCP servers (PostgreSQL, Kafka, MLflow) enabling AI IDE agents to query live platform data during development"
-- "Spec-driven development: 100% of features backed by EARS specifications with full traceability to code (Kiro)"
-- "Deployed on minikube with KEDA auto-scaling on Kafka consumer lag; architected for AWS EKS"
